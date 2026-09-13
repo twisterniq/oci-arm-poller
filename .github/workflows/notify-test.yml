@@ -1,0 +1,28 @@
+name: Notify test
+
+# Manual: sends one Telegram message so you can verify the bot token and chat id.
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  test:
+    runs-on: ubuntu-slim
+    steps:
+      - name: Send Telegram test
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID secrets are not set"; exit 1
+          fi
+          resp="$(curl -sS "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=oci-arm-poller: test notification.")"
+          if printf '%s' "$resp" | grep -q '"ok":true'; then
+            echo "sent ok"
+          else
+            echo "Telegram send failed (check secrets)"; exit 1
+          fi

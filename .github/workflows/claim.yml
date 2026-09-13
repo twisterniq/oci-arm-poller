@@ -1,0 +1,48 @@
+name: Claim OCI Always Free instance
+
+on:
+  schedule:
+    # Public repo => unlimited Actions minutes, so poll aggressively.
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+# Never let two claims overlap.
+concurrency:
+  group: oci-claim
+  cancel-in-progress: false
+
+jobs:
+  claim:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Try to claim an instance
+        env:
+          # Secrets (sensitive)
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OCI_TENANCY: ${{ secrets.OCI_TENANCY }}
+          OCI_USER: ${{ secrets.OCI_USER }}
+          OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
+          OCI_KEY: ${{ secrets.OCI_KEY }}
+          OCI_COMPARTMENT: ${{ secrets.OCI_COMPARTMENT }}
+          OCI_AD: ${{ secrets.OCI_AD }}
+          OCI_SUBNET: ${{ secrets.OCI_SUBNET }}
+          OCI_SSH_PUBLIC_KEY: ${{ secrets.OCI_SSH_PUBLIC_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # Variables (non-sensitive)
+          OCI_REGION: ${{ vars.OCI_REGION }}
+          OCI_IMAGE_OCID: ${{ vars.OCI_IMAGE_OCID }}
+          INSTANCE_NAME: ${{ vars.INSTANCE_NAME }}
+          ARM_OCPUS: ${{ vars.ARM_OCPUS }}
+          ARM_MEMORY_GB: ${{ vars.ARM_MEMORY_GB }}
+          ALLOW_MICRO: ${{ vars.ALLOW_MICRO }}
+        run: |
+          bash scripts/claim.sh --self-test
+          bash scripts/claim.sh
