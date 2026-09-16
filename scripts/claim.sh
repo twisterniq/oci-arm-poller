@@ -17,28 +17,51 @@ self_test() {
   local empty
   empty="$(printf '' | openssl dgst -sha256 -binary | openssl base64 -A)"
   [[ "$empty" == "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=" ]]
+
+  # a pinned image short-circuits the API lookup (and keeps this test offline)
+  OCI_IMAGE_OCID="ocid1.image.oc1..pinned"
+  [[ "$(resolve_image VM.Standard.A1.Flex)" == "$OCI_IMAGE_OCID" ]]
+
+  # a hard error on the fallback shape must not end the run before the last round
+  local rounds="$tmp/rounds" mrc
+  OCI_TENANCY=t OCI_USER=u OCI_FINGERPRINT=f OCI_KEY=x
+  OCI_REGION=r OCI_COMPARTMENT=c OCI_AD=a OCI_SUBNET=s
+  setup
+  resolve_image() { printf 'img'; }
+  try_launch() { echo "$1" >> "$rounds"; [[ "$1" == VM.Standard.A1.Flex ]] && return 3; return 1; }
+  ALLOW_MICRO=true MAX_ROUNDS=2 RETRY_SLEEP=0
+  set +e
+  main >/dev/null 2>&1
+  mrc=$?
+  set -e
+  [[ $mrc -eq 0 && "$(grep -c . "$rounds")" == 4 ]] || {
+    echo "self-test: fallback error cut the run short (rc=${mrc}, attempts=$(grep -c . "$rounds" 2>/dev/null))" >&2
+    exit 1
+  }
+
   rm -rf "$tmp"
   echo "self-test ok"
 }
-if [[ "${1:-}" == "--self-test" ]]; then self_test; exit 0; fi
-
 # ---------------------------------------------------------------- config
 need() { [[ -n "${!1:-}" ]] || { echo "missing env: $1" >&2; exit 2; }; }
-for v in OCI_TENANCY OCI_USER OCI_FINGERPRINT OCI_KEY OCI_REGION OCI_COMPARTMENT OCI_AD OCI_SUBNET; do need "$v"; done
 
-HOST="iaas.${OCI_REGION}.oraclecloud.com"
-NAME="${INSTANCE_NAME:-server-1}"
-ARM_OCPUS="${ARM_OCPUS:-2}"
-ARM_MEMORY_GB="${ARM_MEMORY_GB:-12}"
-ALLOW_MICRO="${ALLOW_MICRO:-true}"
-MAX_ROUNDS="${MAX_ROUNDS:-2}"
-RETRY_SLEEP="${RETRY_SLEEP:-20}"
-LAUNCHED_ID=""
+setup() {
+  for v in OCI_TENANCY OCI_USER OCI_FINGERPRINT OCI_KEY OCI_REGION OCI_COMPARTMENT OCI_AD OCI_SUBNET; do need "$v"; done
 
-KEY="$(mktemp)"
-trap 'rm -f "$KEY"' EXIT
-printf '%s\n' "$OCI_KEY" > "$KEY"
-chmod 600 "$KEY"
+  HOST="iaas.${OCI_REGION}.oraclecloud.com"
+  NAME="${INSTANCE_NAME:-server-1}"
+  ARM_OCPUS="${ARM_OCPUS:-2}"
+  ARM_MEMORY_GB="${ARM_MEMORY_GB:-12}"
+  ALLOW_MICRO="${ALLOW_MICRO:-true}"
+  MAX_ROUNDS="${MAX_ROUNDS:-2}"
+  RETRY_SLEEP="${RETRY_SLEEP:-20}"
+  LAUNCHED_ID=""
+
+  KEY="$(mktemp)"
+  trap 'rm -f "$KEY"' EXIT
+  printf '%s\n' "$OCI_KEY" > "$KEY"
+  chmod 600 "$KEY"
+}
 
 # ---------------------------------------------------------------- signer
 # oci_request METHOD PATH [BODY]  -> prints the response body
@@ -73,11 +96,18 @@ date: ${when}"
   sig="$(printf '%s' "$sstring" | openssl dgst -sha256 -sign "$KEY" -binary | openssl base64 -A)"
   local authz="Signature version=\"1\",keyId=\"${OCI_TENANCY}/${OCI_USER}/${OCI_FINGERPRINT}\",algorithm=\"rsa-sha256\",${hook},signature=\"${sig}\""
 
-  curl -sS --retry 2 --retry-delay 1 -X "$method" "https://${host}${path}" "${args[@]}" -H "Authorization: ${authz}"
+  # only GETs are auto-retried: a POST whose response times out may already have
+  # created the instance, and re-sending it would hide the launch behind a duplicate.
+  local retry=()
+  [[ "$method" == "GET" ]] && retry=( --retry 2 --retry-delay 1 )
+
+  curl -sS ${retry[@]+"${retry[@]}"} -X "$method" "https://${host}${path}" "${args[@]}" -H "Authorization: ${authz}"
 }
 
 resolve_image() {
   local shape="$1"
+  # OCI_IMAGE_OCID pins a known-good image and skips the per-run lookup
+  [[ -z "${OCI_IMAGE_OCID:-}" ]] || { printf '%s' "$OCI_IMAGE_OCID"; return 0; }
   local path="/20160918/images?compartmentId=${OCI_COMPARTMENT}&operatingSystem=Canonical%20Ubuntu&shape=${shape}&sortBy=TIMECREATED&sortOrder=DESC&limit=25"
   # list endpoints return a bare JSON array; prefer Ubuntu LTS 24.04 (Python 3.12)
   oci_request GET "$path" | jq -r '[.[] | select(.displayName | test("24\\.04"))][0].id // .[0].id // empty' 2>/dev/null || true
@@ -175,13 +205,17 @@ main() {
       if [[ $rc -eq 0 ]]; then set -e; handle_success VM.Standard.E2.1.Micro; fi
       if [[ $rc -eq 4 ]]; then set -e; echo "instance already exists"; exit 0; fi
       if [[ $rc -eq 5 ]]; then set -e; echo "rate limited, stopping this run"; exit 0; fi
-      if [[ $rc -eq 1 ]]; then set -e; exit 1; fi
+      # micro is only a fallback (it can be absent from this region altogether), so a
+      # hard error must not cut the run short and lose the remaining ARM rounds.
+      if [[ $rc -eq 1 ]]; then echo "warning: micro attempt failed, staying on ARM"; fi
     fi
     set -e
-    [[ $round -lt $MAX_ROUNDS ]] && sleep "$RETRY_SLEEP"
+    if [[ $round -lt $MAX_ROUNDS ]]; then sleep "$RETRY_SLEEP"; fi
   done
 
   echo "no capacity this run"
 }
 
+if [[ "${1:-}" == "--self-test" ]]; then self_test; exit 0; fi
+setup
 main
