@@ -18,7 +18,8 @@ concurrency:
 jobs:
   claim:
     runs-on: ubuntu-24.04
-    timeout-minutes: 4
+    # GitHub only fires this schedule every few hours, so each run keeps retrying ~50 min.
+    timeout-minutes: 58
     steps:
       - uses: actions/checkout@v7
 
@@ -43,6 +44,8 @@ jobs:
           ARM_OCPUS: ${{ vars.ARM_OCPUS }}
           ARM_MEMORY_GB: ${{ vars.ARM_MEMORY_GB }}
           ALLOW_MICRO: ${{ vars.ALLOW_MICRO }}
+          MAX_ROUNDS: "50"
+          RETRY_SLEEP: "60"
         run: |
           bash scripts/claim.sh --self-test
           bash scripts/claim.sh
